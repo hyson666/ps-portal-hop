@@ -1,0 +1,15 @@
+services:
+  proxy:
+    build: .
+    image: ps-portal-hop:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8050}:${PORT:-8050}/tcp"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777

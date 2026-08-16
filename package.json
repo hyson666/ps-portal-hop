@@ -1,0 +1,31 @@
+{
+  "name": "ps-portal-hop",
+  "version": "1.1.0",
+  "description": "Tiny, safe-by-default, self-hosted HTTP proxy hop for PlayStation Portal",
+  "main": "proxy.js",
+  "scripts": {
+    "start": "node proxy.js",
+    "check": "node --check proxy.js && node --check test/proxy.test.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "playstation-portal",
+    "http-proxy",
+    "connect-proxy",
+    "self-hosted"
+  ],
+  "author": "hyson666",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyson666/ps-portal-hop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hyson666/ps-portal-hop/issues"
+  },
+  "homepage": "https://github.com/hyson666/ps-portal-hop#readme",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  }
+}

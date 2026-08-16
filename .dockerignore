@@ -1,0 +1,8 @@
+.claude
+.env
+.git
+.github
+coverage
+node_modules
+npm-debug.log
+test
