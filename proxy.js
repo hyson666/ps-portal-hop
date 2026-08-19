@@ -761,6 +761,9 @@ function createProxyServer(configInput = {}) {
     const connectionId = nextConnectionId++;
     const client = normalizeAddress(socket.remoteAddress);
     socket.__ps5ConnectionId = connectionId;
+    socket.on("error", (error) => {
+      log("client_socket_error", { connectionId, client, code: error.code });
+    });
 
     const clientConnections = connectionsByClient.get(client) || 0;
     const allowedClient = config.clientMatcher.matches(client);

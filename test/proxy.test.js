@@ -187,6 +187,33 @@ test("public relay rejects non-allowlisted CONNECT targets before dialing", asyn
   assert.match(response, /^HTTP\/1\.1 403 Forbidden/);
 });
 
+test("client reset after a rejected CONNECT does not stop the proxy", async (t) => {
+  const proxy = createProxyServer({
+    host: "0.0.0.0",
+    allowedClients: "*",
+    allowedHosts: ".playstation.com",
+    allowPublicRelay: true,
+    logFormat: "silent",
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  await new Promise((resolve) => {
+    const socket = net.connect(proxyPort, "127.0.0.1");
+    socket.once("connect", () => {
+      socket.write("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n");
+      setImmediate(() => socket.resetAndDestroy());
+    });
+    socket.once("error", resolve);
+    socket.once("close", resolve);
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(proxy.listening, true);
+  const response = await requestThroughProxy(proxyPort, "http://example.com/");
+  assert.equal(response.statusCode, 403);
+});
+
 test("rate limiter keeps one client from consuming the global allowance", () => {
   const limiter = createFixedWindowRateLimiter(2, 1, 60_000);
   const start = Date.now();
