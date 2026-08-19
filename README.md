@@ -16,7 +16,8 @@
 - 默认只允许本机客户端。
 - 默认阻止访问回环、局域网、链路本地和其他特殊用途目标地址，降低 SSRF 风险。
 - `CONNECT` 默认只允许目标端口 `443`，普通 HTTP 默认只允许目标端口 `80`。
-- 如果同时配置 `HOST=0.0.0.0` 和 `ALLOWED_CLIENTS=*`，程序会拒绝启动；除非显式设置危险开关 `ALLOW_PUBLIC_PROXY=true`。
+- 如果同时配置 `HOST=0.0.0.0` 和 `ALLOWED_CLIENTS=*`，程序默认拒绝启动。只有目标域名受限、端口严格为 `443/80`、私网阻断开启且显式设置 `ALLOW_PUBLIC_RELAY=true` 时，才允许启动公共 Portal 中继。
+- 公共中继模式拒绝 IP 形式的目标，并对全局及单客户端的新连接和请求速率设限。
 
 不要把未经限制的正向代理暴露到公网。
 
@@ -115,6 +116,22 @@ docker compose down
 
 如果客户端公网 IP 经常变化，不要简单改成 `*`。更安全的方式是让 PS Portal 连接到运行 WireGuard/VPN 客户端的旅行路由器，再由路由器访问 VPS。
 
+如果确实需要让不同公网 IP 的 Portal 直接使用同一台 VPS，可启用受限公共中继：
+
+```dotenv
+HOST=0.0.0.0
+PORT=8050
+ALLOWED_CLIENTS=*
+ALLOWED_HOSTS=.playstation.com,.playstation.net,.sony.com,.sonyentertainmentnetwork.com,.google.com,.googleapis.com,.googleapis.cn,.gstatic.com,.googleusercontent.com,.ggpht.com,.googlevideo.com,.android.com,.gvt1.com,.gvt2.com,.gvt3.com,.1e100.net,.withgoogle.com
+ALLOWED_CONNECT_PORTS=443
+ALLOWED_HTTP_PORTS=80
+BLOCK_PRIVATE_TARGETS=true
+ALLOW_PUBLIC_RELAY=true
+ALLOW_PUBLIC_PROXY=false
+```
+
+此模式不是通用开放代理：未列入的域名、IP 形式目标、私网目标及其他端口都会返回 `403`。公网用户仍会消耗你的 VPS 带宽和可选上游代理额度，请保留默认的并发/速率限制并监控日志。
+
 ## 配置参考
 
 | 环境变量 | 默认值 | 说明 |
@@ -126,8 +143,14 @@ docker compose down
 | `ALLOWED_CONNECT_PORTS` | `443` | 允许的 CONNECT 目标端口 |
 | `ALLOWED_HTTP_PORTS` | `80` | 允许的普通 HTTP 目标端口 |
 | `BLOCK_PRIVATE_TARGETS` | `true` | 阻止代理访问私网和特殊用途 IP |
+| `ALLOW_PUBLIC_RELAY` | `false` | 允许受目标白名单、端口和私网保护约束的公共中继 |
+| `ALLOW_PUBLIC_PROXY` | `false` | 危险逃生开关：允许通用公共代理，不建议启用 |
 | `MAX_CONNECTIONS` | `128` | 全局最大客户端连接数 |
 | `MAX_CONNECTIONS_PER_CLIENT` | `24` | 单个客户端最大连接数 |
+| `MAX_NEW_CONNECTIONS_PER_MINUTE` | `600` | 每分钟允许的新连接总数 |
+| `MAX_NEW_CONNECTIONS_PER_CLIENT_PER_MINUTE` | `60` | 单客户端每分钟允许的新连接数 |
+| `MAX_REQUESTS_PER_MINUTE` | `1200` | 每分钟允许的 HTTP/CONNECT 请求总数 |
+| `MAX_REQUESTS_PER_CLIENT_PER_MINUTE` | `120` | 单客户端每分钟允许的 HTTP/CONNECT 请求数 |
 | `UPSTREAM_HOST` | 空 | 可选上游 HTTP 代理地址 |
 | `UPSTREAM_PORT` | `8050` | 上游 HTTP 代理端口 |
 | `LOG_FORMAT` | `text` | `text`、`json` 或 `silent` |

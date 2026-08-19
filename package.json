@@ -1,6 +1,6 @@
 {
   "name": "ps-portal-hop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Tiny, safe-by-default, self-hosted HTTP proxy hop for PlayStation Portal",
   "main": "proxy.js",
   "scripts": {

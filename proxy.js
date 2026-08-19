@@ -4,7 +4,7 @@ const dns = require("node:dns").promises;
 const http = require("node:http");
 const net = require("node:net");
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 const DEFAULTS = Object.freeze({
   host: "127.0.0.1",
@@ -15,10 +15,15 @@ const DEFAULTS = Object.freeze({
   allowedHosts: "*",
   allowedConnectPorts: "443",
   allowedHttpPorts: "80",
+  allowPublicRelay: false,
   allowPublicProxy: false,
   blockPrivateTargets: true,
   maxConnections: 128,
   maxConnectionsPerClient: 24,
+  maxNewConnectionsPerMinute: 600,
+  maxNewConnectionsPerClientPerMinute: 60,
+  maxRequestsPerMinute: 1_200,
+  maxRequestsPerClientPerMinute: 120,
   maxHeaderBytes: 16 * 1024,
   headersTimeoutMs: 10_000,
   requestTimeoutMs: 30_000,
@@ -166,9 +171,13 @@ function createClientMatcher(rules) {
 function createHostMatcher(rules) {
   const entries = parseList(rules).map((entry) => entry.toLowerCase());
   if (entries.length === 0) throw new Error("ALLOWED_HOSTS cannot be empty");
-  if (entries.includes("*")) return () => true;
+  if (entries.includes("*")) {
+    const matcher = () => true;
+    matcher.allowsAll = true;
+    return matcher;
+  }
 
-  return (hostname) => {
+  const matcher = (hostname) => {
     const host = normalizeHostname(hostname);
     return entries.some((entry) => {
       const suffix = entry.startsWith("*.") ? entry.slice(1) : entry;
@@ -178,6 +187,8 @@ function createHostMatcher(rules) {
       return host === normalizeHostname(entry);
     });
   };
+  matcher.allowsAll = false;
+  return matcher;
 }
 
 function buildConfig(overrides = {}) {
@@ -194,6 +205,7 @@ function buildConfig(overrides = {}) {
       "ALLOWED_CONNECT_PORTS"
     ),
     allowedHttpPorts: parsePortList(raw.allowedHttpPorts ?? DEFAULTS.allowedHttpPorts, "ALLOWED_HTTP_PORTS"),
+    allowPublicRelay: parseBoolean(raw.allowPublicRelay, "ALLOW_PUBLIC_RELAY", DEFAULTS.allowPublicRelay),
     allowPublicProxy: parseBoolean(raw.allowPublicProxy, "ALLOW_PUBLIC_PROXY", DEFAULTS.allowPublicProxy),
     blockPrivateTargets: parseBoolean(
       raw.blockPrivateTargets,
@@ -207,6 +219,34 @@ function buildConfig(overrides = {}) {
       DEFAULTS.maxConnectionsPerClient,
       1,
       10_000
+    ),
+    maxNewConnectionsPerMinute: parseInteger(
+      raw.maxNewConnectionsPerMinute,
+      "MAX_NEW_CONNECTIONS_PER_MINUTE",
+      DEFAULTS.maxNewConnectionsPerMinute,
+      1,
+      1_000_000
+    ),
+    maxNewConnectionsPerClientPerMinute: parseInteger(
+      raw.maxNewConnectionsPerClientPerMinute,
+      "MAX_NEW_CONNECTIONS_PER_CLIENT_PER_MINUTE",
+      DEFAULTS.maxNewConnectionsPerClientPerMinute,
+      1,
+      1_000_000
+    ),
+    maxRequestsPerMinute: parseInteger(
+      raw.maxRequestsPerMinute,
+      "MAX_REQUESTS_PER_MINUTE",
+      DEFAULTS.maxRequestsPerMinute,
+      1,
+      1_000_000
+    ),
+    maxRequestsPerClientPerMinute: parseInteger(
+      raw.maxRequestsPerClientPerMinute,
+      "MAX_REQUESTS_PER_CLIENT_PER_MINUTE",
+      DEFAULTS.maxRequestsPerClientPerMinute,
+      1,
+      1_000_000
     ),
     maxHeaderBytes: parseInteger(raw.maxHeaderBytes, "MAX_HEADER_BYTES", DEFAULTS.maxHeaderBytes, 1_024, 1_048_576),
     headersTimeoutMs: parseInteger(
@@ -261,14 +301,34 @@ function buildConfig(overrides = {}) {
   if (config.maxConnectionsPerClient > config.maxConnections) {
     throw new Error("MAX_CONNECTIONS_PER_CLIENT cannot exceed MAX_CONNECTIONS");
   }
+  if (config.maxNewConnectionsPerClientPerMinute > config.maxNewConnectionsPerMinute) {
+    throw new Error(
+      "MAX_NEW_CONNECTIONS_PER_CLIENT_PER_MINUTE cannot exceed MAX_NEW_CONNECTIONS_PER_MINUTE"
+    );
+  }
+  if (config.maxRequestsPerClientPerMinute > config.maxRequestsPerMinute) {
+    throw new Error("MAX_REQUESTS_PER_CLIENT_PER_MINUTE cannot exceed MAX_REQUESTS_PER_MINUTE");
+  }
 
   config.clientMatcher = createClientMatcher(config.allowedClients);
   config.hostMatcher = createHostMatcher(config.allowedHosts);
 
   const wildcardListener = ["0.0.0.0", "::"].includes(config.host);
-  if (wildcardListener && config.clientMatcher.allowsAll && !config.allowPublicProxy) {
+  const publicListener = wildcardListener && config.clientMatcher.allowsAll;
+  const relayRestrictionsAreSafe =
+    !config.hostMatcher.allowsAll &&
+    config.blockPrivateTargets &&
+    config.allowedConnectPorts.size === 1 &&
+    config.allowedConnectPorts.has(443) &&
+    config.allowedHttpPorts.size === 1 &&
+    config.allowedHttpPorts.has(80);
+
+  config.publicRelayActive = publicListener && config.allowPublicRelay && relayRestrictionsAreSafe;
+
+  if (publicListener && !config.publicRelayActive && !config.allowPublicProxy) {
     throw new Error(
-      "Refusing to start an open proxy. Restrict ALLOWED_CLIENTS or explicitly set ALLOW_PUBLIC_PROXY=true."
+      "Refusing to start a public listener. Use restricted ALLOWED_HOSTS, ports 80/443, " +
+        "BLOCK_PRIVATE_TARGETS=true, and ALLOW_PUBLIC_RELAY=true."
     );
   }
 
@@ -285,10 +345,15 @@ function loadConfig(env = process.env) {
     allowedHosts: env.ALLOWED_HOSTS,
     allowedConnectPorts: env.ALLOWED_CONNECT_PORTS,
     allowedHttpPorts: env.ALLOWED_HTTP_PORTS,
+    allowPublicRelay: env.ALLOW_PUBLIC_RELAY,
     allowPublicProxy: env.ALLOW_PUBLIC_PROXY,
     blockPrivateTargets: env.BLOCK_PRIVATE_TARGETS,
     maxConnections: env.MAX_CONNECTIONS,
     maxConnectionsPerClient: env.MAX_CONNECTIONS_PER_CLIENT,
+    maxNewConnectionsPerMinute: env.MAX_NEW_CONNECTIONS_PER_MINUTE,
+    maxNewConnectionsPerClientPerMinute: env.MAX_NEW_CONNECTIONS_PER_CLIENT_PER_MINUTE,
+    maxRequestsPerMinute: env.MAX_REQUESTS_PER_MINUTE,
+    maxRequestsPerClientPerMinute: env.MAX_REQUESTS_PER_CLIENT_PER_MINUTE,
     maxHeaderBytes: env.MAX_HEADER_BYTES,
     headersTimeoutMs: env.HEADERS_TIMEOUT_MS,
     requestTimeoutMs: env.REQUEST_TIMEOUT_MS,
@@ -347,6 +412,10 @@ function isBlockedTarget(address) {
 }
 
 async function resolveTarget(hostname, config) {
+  if (config.publicRelayActive && net.isIP(hostname)) {
+    throw Object.assign(new Error("IP-literal targets are blocked in public relay mode"), { statusCode: 403 });
+  }
+
   if (!config.hostMatcher(hostname)) {
     throw Object.assign(new Error("Target host is not allowed"), { statusCode: 403 });
   }
@@ -374,6 +443,30 @@ async function resolveTarget(hostname, config) {
     throw Object.assign(new Error("Private or special-use target addresses are blocked"), { statusCode: 403 });
   }
   return allowed[0];
+}
+
+function createFixedWindowRateLimiter(globalLimit, perClientLimit, windowMs = 60_000) {
+  let windowStartedAt = Date.now();
+  let globalCount = 0;
+  const countsByClient = new Map();
+
+  return {
+    take(client, now = Date.now()) {
+      if (now - windowStartedAt >= windowMs) {
+        windowStartedAt = now;
+        globalCount = 0;
+        countsByClient.clear();
+      }
+
+      const clientCount = countsByClient.get(client) || 0;
+      if (clientCount >= perClientLimit) return false;
+
+      if (globalCount >= globalLimit) return false;
+      globalCount += 1;
+      countsByClient.set(client, clientCount + 1);
+      return true;
+    },
+  };
 }
 
 function filterHeaders(headers) {
@@ -635,10 +728,24 @@ function createProxyServer(configInput = {}) {
   const log = createLogger(config.logFormat);
   const sockets = new Set();
   const connectionsByClient = new Map();
+  const connectionRateLimiter = createFixedWindowRateLimiter(
+    config.maxNewConnectionsPerMinute,
+    config.maxNewConnectionsPerClientPerMinute
+  );
+  const requestRateLimiter = createFixedWindowRateLimiter(
+    config.maxRequestsPerMinute,
+    config.maxRequestsPerClientPerMinute
+  );
   let nextConnectionId = 1;
 
   const server = http.createServer({ maxHeaderSize: config.maxHeaderBytes }, (request, response) => {
     const connectionId = request.socket.__ps5ConnectionId || "unknown";
+    const client = normalizeAddress(request.socket.remoteAddress);
+    if (request.socket.__ps5Accepted !== false && !requestRateLimiter.take(client)) {
+      log("request_rate_limited", { connectionId, client, method: request.method });
+      sendHttpError(response, 429, "Request rate limit reached");
+      return;
+    }
     handleHttpRequest(request, response, config, log, connectionId).catch((error) => {
       log("http_internal_error", { connectionId, error: error.message });
       sendHttpError(response, 500, "Internal proxy error");
@@ -656,15 +763,23 @@ function createProxyServer(configInput = {}) {
     socket.__ps5ConnectionId = connectionId;
 
     const clientConnections = connectionsByClient.get(client) || 0;
-    const rejected =
-      !config.clientMatcher.matches(client) ||
+    const allowedClient = config.clientMatcher.matches(client);
+    const withinConnectionRate = allowedClient && connectionRateLimiter.take(client);
+    const rejected = !allowedClient ||
+      !withinConnectionRate ||
       sockets.size >= config.maxConnections ||
       clientConnections >= config.maxConnectionsPerClient;
 
     if (rejected) {
       socket.__ps5Accepted = false;
-      log("client_rejected", { connectionId, client });
-      sendSocketError(socket, 403, "Client is not allowed or connection limit was reached");
+      const statusCode = allowedClient ? 429 : 403;
+      log("client_rejected", {
+        connectionId,
+        client,
+        statusCode,
+        reason: allowedClient ? "connection_limit" : "not_allowed",
+      });
+      sendSocketError(socket, statusCode, allowedClient ? "Connection limit reached" : "Client is not allowed");
       return;
     }
 
@@ -681,6 +796,12 @@ function createProxyServer(configInput = {}) {
 
   server.on("connect", (request, socket, head) => {
     const connectionId = socket.__ps5ConnectionId || "unknown";
+    const client = normalizeAddress(socket.remoteAddress);
+    if (socket.__ps5Accepted !== false && !requestRateLimiter.take(client)) {
+      log("request_rate_limited", { connectionId, client, method: "CONNECT" });
+      sendSocketError(socket, 429, "Request rate limit reached");
+      return;
+    }
     handleConnect(request, socket, head, config, log, connectionId).catch((error) => {
       log("connect_internal_error", { connectionId, error: error.message });
       sendSocketError(socket, 500, "Internal proxy error");
@@ -746,9 +867,11 @@ if (require.main === module) startFromEnvironment();
 module.exports = {
   VERSION,
   buildConfig,
+  createFixedWindowRateLimiter,
   createProxyServer,
   loadConfig,
   normalizeAddress,
   parseAuthority,
+  resolveTarget,
   startFromEnvironment,
 };

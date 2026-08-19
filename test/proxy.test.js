@@ -6,7 +6,13 @@ const net = require("node:net");
 const { once } = require("node:events");
 const test = require("node:test");
 
-const { buildConfig, createProxyServer, parseAuthority } = require("../proxy");
+const {
+  buildConfig,
+  createFixedWindowRateLimiter,
+  createProxyServer,
+  parseAuthority,
+  resolveTarget,
+} = require("../proxy");
 
 async function listen(server) {
   server.listen(0, "127.0.0.1");
@@ -98,11 +104,97 @@ function connectAndCollect(port, chunks, expectedText) {
 test("configuration refuses an unrestricted wildcard listener", () => {
   assert.throws(
     () => buildConfig({ host: "0.0.0.0", allowedClients: "*" }),
-    /Refusing to start an open proxy/
+    /Refusing to start a public listener/
   );
   assert.doesNotThrow(() =>
     buildConfig({ host: "0.0.0.0", allowedClients: "192.168.0.0/16" })
   );
+});
+
+test("public relay mode requires destination, port, and private-network restrictions", () => {
+  const config = buildConfig({
+    host: "0.0.0.0",
+    allowedClients: "*",
+    allowedHosts: ".playstation.com,connectivitycheck.gstatic.com",
+    allowPublicRelay: true,
+  });
+
+  assert.equal(config.publicRelayActive, true);
+  assert.equal(config.hostMatcher("playstation.com"), true);
+  assert.equal(config.hostMatcher("m.np.playstation.com"), true);
+  assert.equal(config.hostMatcher("evilplaystation.com"), false);
+  assert.equal(config.hostMatcher("example.com"), false);
+
+  assert.throws(
+    () => buildConfig({ host: "0.0.0.0", allowedClients: "*", allowPublicRelay: true }),
+    /Refusing to start a public listener/
+  );
+  assert.throws(
+    () =>
+      buildConfig({
+        host: "0.0.0.0",
+        allowedClients: "*",
+        allowedHosts: ".playstation.com",
+        allowedConnectPorts: "443,8443",
+        allowPublicRelay: true,
+      }),
+    /Refusing to start a public listener/
+  );
+  assert.throws(
+    () =>
+      buildConfig({
+        host: "0.0.0.0",
+        allowedClients: "*",
+        allowedHosts: ".playstation.com",
+        blockPrivateTargets: false,
+        allowPublicRelay: true,
+      }),
+    /Refusing to start a public listener/
+  );
+  assert.doesNotThrow(() =>
+    buildConfig({ host: "0.0.0.0", allowedClients: "*", allowPublicProxy: true })
+  );
+});
+
+test("public relay mode rejects IP-literal targets", async () => {
+  const config = buildConfig({
+    host: "0.0.0.0",
+    allowedClients: "*",
+    allowedHosts: "127.0.0.1",
+    allowPublicRelay: true,
+  });
+
+  await assert.rejects(() => resolveTarget("127.0.0.1", config), /IP-literal targets are blocked/);
+});
+
+test("public relay rejects non-allowlisted CONNECT targets before dialing", async (t) => {
+  const proxy = createProxyServer({
+    host: "0.0.0.0",
+    allowedClients: "*",
+    allowedHosts: ".playstation.com",
+    allowPublicRelay: true,
+    logFormat: "silent",
+  });
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const response = await connectAndCollect(
+    proxyPort,
+    ["CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"],
+    "Target host is not allowed"
+  );
+
+  assert.match(response, /^HTTP\/1\.1 403 Forbidden/);
+});
+
+test("rate limiter keeps one client from consuming the global allowance", () => {
+  const limiter = createFixedWindowRateLimiter(2, 1, 60_000);
+  const start = Date.now();
+  assert.equal(limiter.take("client-a", start), true);
+  assert.equal(limiter.take("client-a", start + 1), false);
+  assert.equal(limiter.take("client-b", start + 2), true);
+  assert.equal(limiter.take("client-c", start + 3), false);
+  assert.equal(limiter.take("client-c", start + 60_000), true);
 });
 
 test("CONNECT authority parser supports domains and bracketed IPv6", () => {
@@ -207,6 +299,29 @@ test("private target addresses are blocked by default", async (t) => {
   const response = await requestThroughProxy(proxyPort, "http://127.0.0.1/");
   assert.equal(response.statusCode, 403);
   assert.match(response.body.toString(), /Private or special-use target addresses are blocked/);
+});
+
+test("limits requests per client per minute", async (t) => {
+  const origin = http.createServer((_request, response) => response.end("ok"));
+  const originPort = await listen(origin);
+  t.after(() => close(origin));
+
+  const proxy = createProxyServer(
+    localProxyConfig({
+      allowedHttpPorts: String(originPort),
+      maxRequestsPerMinute: 2,
+      maxRequestsPerClientPerMinute: 1,
+    })
+  );
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+
+  const first = await requestThroughProxy(proxyPort, `http://127.0.0.1:${originPort}/first`);
+  const second = await requestThroughProxy(proxyPort, `http://127.0.0.1:${originPort}/second`);
+
+  assert.equal(first.statusCode, 200);
+  assert.equal(second.statusCode, 429);
+  assert.match(second.body.toString(), /Request rate limit reached/);
 });
 
 test("chains HTTP requests through an upstream proxy", async (t) => {
