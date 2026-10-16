@@ -151,11 +151,15 @@ ALLOW_PUBLIC_PROXY=false
 | `MAX_NEW_CONNECTIONS_PER_CLIENT_PER_MINUTE` | `60` | 单客户端每分钟允许的新连接数 |
 | `MAX_REQUESTS_PER_MINUTE` | `1200` | 每分钟允许的 HTTP/CONNECT 请求总数 |
 | `MAX_REQUESTS_PER_CLIENT_PER_MINUTE` | `120` | 单客户端每分钟允许的 HTTP/CONNECT 请求数 |
+| `TUNNEL_IDLE_TIMEOUT_MS` | `3600000` | CONNECT 隧道空闲超时（毫秒）；`0` 关闭应用层空闲清理，适合长期待机的 Portal 会话 |
+| `TCP_KEEPALIVE_INITIAL_DELAY_MS` | `30000` | TCP 空闲后开始保活探测的延迟（毫秒），用于维持连接并发现失效对端 |
 | `UPSTREAM_HOST` | 空 | 可选上游 HTTP 代理地址 |
 | `UPSTREAM_PORT` | `8050` | 上游 HTTP 代理端口 |
 | `LOG_FORMAT` | `text` | `text`、`json` 或 `silent` |
 
 完整超时和限制配置参见 [.env.example](.env.example)。
+
+如果连接在闲置一段时间后失效，先检查 `tunnel_timeout` 和 `tunnel_closed` 日志。PSN 推送和控制连接可能长期没有应用数据；过短的空闲超时会主动切断这些连接。可按需设置 `TUNNEL_IDLE_TIMEOUT_MS=0`，同时保留 TCP 保活、并发和速率限制。TCP 保活不等于 Sony 业务心跳，也不能保证 Remote Play 串流建立成功。
 
 ## 当前边界
 

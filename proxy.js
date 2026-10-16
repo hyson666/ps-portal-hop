@@ -4,7 +4,7 @@ const dns = require("node:dns").promises;
 const http = require("node:http");
 const net = require("node:net");
 
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 
 const DEFAULTS = Object.freeze({
   host: "127.0.0.1",
@@ -29,7 +29,8 @@ const DEFAULTS = Object.freeze({
   requestTimeoutMs: 30_000,
   connectTimeoutMs: 10_000,
   httpIdleTimeoutMs: 60_000,
-  tunnelIdleTimeoutMs: 300_000,
+  tunnelIdleTimeoutMs: 3_600_000,
+  tcpKeepAliveInitialDelayMs: 30_000,
   shutdownGraceMs: 10_000,
   logFormat: "text",
 });
@@ -281,8 +282,15 @@ function buildConfig(overrides = {}) {
       raw.tunnelIdleTimeoutMs,
       "TUNNEL_IDLE_TIMEOUT_MS",
       DEFAULTS.tunnelIdleTimeoutMs,
-      1_000,
+      0,
       86_400_000
+    ),
+    tcpKeepAliveInitialDelayMs: parseInteger(
+      raw.tcpKeepAliveInitialDelayMs,
+      "TCP_KEEPALIVE_INITIAL_DELAY_MS",
+      DEFAULTS.tcpKeepAliveInitialDelayMs,
+      1_000,
+      3_600_000
     ),
     shutdownGraceMs: parseInteger(
       raw.shutdownGraceMs,
@@ -360,6 +368,7 @@ function loadConfig(env = process.env) {
     connectTimeoutMs: env.CONNECT_TIMEOUT_MS,
     httpIdleTimeoutMs: env.HTTP_IDLE_TIMEOUT_MS,
     tunnelIdleTimeoutMs: env.TUNNEL_IDLE_TIMEOUT_MS,
+    tcpKeepAliveInitialDelayMs: env.TCP_KEEPALIVE_INITIAL_DELAY_MS,
     shutdownGraceMs: env.SHUTDOWN_GRACE_MS,
     logFormat: env.LOG_FORMAT,
   });
@@ -537,6 +546,8 @@ function pipeTunnel(clientSocket, targetSocket, clientHead, targetHead, config, 
     clientSocket.destroy();
   };
 
+  clientSocket.setKeepAlive(true, config.tcpKeepAliveInitialDelayMs);
+  targetSocket.setKeepAlive(true, config.tcpKeepAliveInitialDelayMs);
   clientSocket.setTimeout(config.tunnelIdleTimeoutMs);
   targetSocket.setTimeout(config.tunnelIdleTimeoutMs);
   clientSocket.on("timeout", () => closeBoth("tunnel_timeout"));
@@ -870,6 +881,8 @@ function startFromEnvironment() {
       address: `${config.host}:${config.port}`,
       mode: config.upstreamHost ? "upstream" : "direct",
       upstream: config.upstreamHost ? `${config.upstreamHost}:${config.upstreamPort}` : undefined,
+      tunnelIdleTimeoutMs: config.tunnelIdleTimeoutMs,
+      tcpKeepAliveInitialDelayMs: config.tcpKeepAliveInitialDelayMs,
     });
   });
 

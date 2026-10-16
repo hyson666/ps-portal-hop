@@ -360,6 +360,45 @@ test("an idle CONNECT tunnel logs its timeout and close reason", async (t) => {
   assert.ok(entries.some((entry) => entry.event === "tunnel_timeout"));
 });
 
+test("CONNECT can disable idle timers through a proxy chain and remain usable", { timeout: 4_000 }, async (t) => {
+  const echo = net.createServer((socket) => socket.pipe(socket));
+  let upstream;
+  let proxy;
+  let tunnelSocket;
+  t.after(async () => {
+    tunnelSocket?.destroy();
+    if (proxy) await close(proxy);
+    if (upstream) await close(upstream);
+    await close(echo);
+  });
+  const echoPort = await listen(echo);
+  upstream = createProxyServer(localProxyConfig({
+    allowedConnectPorts: String(echoPort), tunnelIdleTimeoutMs: 0,
+    tcpKeepAliveInitialDelayMs: 1_000,
+  }));
+  const upstreamPort = await listen(upstream);
+  proxy = createProxyServer(localProxyConfig({
+    allowedConnectPorts: String(echoPort), tunnelIdleTimeoutMs: 0,
+    tcpKeepAliveInitialDelayMs: 1_000,
+    upstreamHost: "127.0.0.1", upstreamPort, connectTimeoutMs: 500,
+  }));
+  const proxyPort = await listen(proxy);
+  const request = http.request({
+    host: "127.0.0.1", port: proxyPort, method: "CONNECT", path: `127.0.0.1:${echoPort}`,
+    agent: false,
+  });
+  const connected = once(request, "connect");
+  request.end();
+  const [, socket] = await connected;
+  tunnelSocket = socket;
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  assert.equal(socket.destroyed, false);
+  const received = once(socket, "data");
+  socket.write("after-idle");
+  const [data] = await received;
+  assert.equal(data.toString(), "after-idle");
+});
+
 test("a malformed CONNECT request returns 400 without stopping the proxy", async (t) => {
   const origin = http.createServer((_request, response) => response.end("still-alive"));
   const originPort = await listen(origin);
