@@ -511,11 +511,28 @@ function sendSocketError(socket, statusCode, message) {
 }
 
 function pipeTunnel(clientSocket, targetSocket, clientHead, targetHead, config, log, fields) {
+  const startedAt = process.hrtime.bigint();
+  const initialClientBytes = clientSocket.bytesRead;
+  const initialTargetBytes = targetSocket.bytesRead;
+  let closeReason;
+  let closeLogged = false;
+  const recordClose = (fallbackReason) => {
+    if (closeLogged) return;
+    closeLogged = true;
+    log("tunnel_closed", {
+      ...fields,
+      reason: closeReason || fallbackReason,
+      durationMs: Math.round(Number(process.hrtime.bigint() - startedAt) / 1e6),
+      bytesFromClient: (clientHead?.length || 0) + Math.max(0, clientSocket.bytesRead - initialClientBytes),
+      bytesFromTarget: (targetHead?.length || 0) + Math.max(0, targetSocket.bytesRead - initialTargetBytes),
+    });
+  };
   let closed = false;
   const closeBoth = (event, error) => {
     if (closed) return;
     closed = true;
-    if (error) log(event, { ...fields, error: error.message });
+    closeReason = event;
+    log(event, { ...fields, ...(error ? { error: error.message } : {}) });
     targetSocket.destroy();
     clientSocket.destroy();
   };
@@ -526,8 +543,16 @@ function pipeTunnel(clientSocket, targetSocket, clientHead, targetHead, config, 
   targetSocket.on("timeout", () => closeBoth("tunnel_timeout"));
   clientSocket.on("error", (error) => closeBoth("client_error", error));
   targetSocket.on("error", (error) => closeBoth("target_error", error));
-  clientSocket.on("close", () => targetSocket.destroy());
-  targetSocket.on("close", () => clientSocket.destroy());
+  clientSocket.once("end", () => { closeReason ||= "client_end"; });
+  targetSocket.once("end", () => { closeReason ||= "target_end"; });
+  clientSocket.on("close", () => {
+    recordClose("client_closed");
+    targetSocket.destroy();
+  });
+  targetSocket.on("close", () => {
+    recordClose("target_closed");
+    clientSocket.destroy();
+  });
 
   clientSocket.write("HTTP/1.1 200 Connection Established\r\nProxy-Agent: ps-portal-hop\r\n\r\n");
   if (clientHead?.length) targetSocket.write(clientHead);

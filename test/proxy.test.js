@@ -290,6 +290,76 @@ test("CONNECT handles fragmented headers and preserves bytes received after them
   assert.match(response, /^HTTP\/1\.1 200 Connection Established/);
 });
 
+test("CONNECT logs one close summary with tunneled byte counts, without payloads", async (t) => {
+  const entries = [];
+  let resolveClosed;
+  const closed = new Promise((resolve) => { resolveClosed = resolve; });
+  t.mock.method(console, "log", (line) => {
+    const entry = JSON.parse(line);
+    entries.push(entry);
+    if (entry.event === "tunnel_closed") resolveClosed(entry);
+  });
+  const echo = net.createServer((socket) => socket.pipe(socket));
+  const echoPort = await listen(echo);
+  t.after(() => close(echo));
+  const proxy = createProxyServer(localProxyConfig({
+    allowedConnectPorts: String(echoPort), logFormat: "json",
+  }));
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+  const payload = "private-payload-must-not-be-logged";
+  await connectAndCollect(proxyPort, [
+    `CONNECT 127.0.0.1:${echoPort} HTTP/1.1\r\nHost: 127.0.0.1:${echoPort}\r\n\r\n${payload}`,
+  ], payload);
+  const timer = setTimeout(() => resolveClosed(null), 2_000);
+  t.after(() => clearTimeout(timer));
+  const summary = await closed;
+  assert.ok(summary, "the tunnel must emit a close summary");
+  assert.equal(summary.bytesFromClient, Buffer.byteLength(payload));
+  assert.equal(summary.bytesFromTarget, Buffer.byteLength(payload));
+  assert.ok(summary.durationMs >= 0);
+  assert.ok(["client_end", "client_closed"].includes(summary.reason));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(entries.filter((entry) => entry.event === "tunnel_closed").length, 1);
+  assert.equal(JSON.stringify(entries).includes(payload), false);
+});
+
+test("an idle CONNECT tunnel logs its timeout and close reason", async (t) => {
+  const entries = [];
+  let resolveClosed;
+  const closed = new Promise((resolve) => { resolveClosed = resolve; });
+  t.mock.method(console, "log", (line) => {
+    const entry = JSON.parse(line);
+    entries.push(entry);
+    if (entry.event === "tunnel_closed") resolveClosed(entry);
+  });
+  const echo = net.createServer((socket) => socket.pipe(socket));
+  const echoPort = await listen(echo);
+  t.after(() => close(echo));
+  const proxy = createProxyServer(localProxyConfig({
+    allowedConnectPorts: String(echoPort), tunnelIdleTimeoutMs: 1_000, logFormat: "json",
+  }));
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+  const request = http.request({
+    host: "127.0.0.1", port: proxyPort, method: "CONNECT", path: `127.0.0.1:${echoPort}`,
+    agent: false,
+  });
+  const connected = once(request, "connect");
+  request.end();
+  const [, socket] = await connected;
+  t.after(() => socket.destroy());
+  socket.resume();
+  const timer = setTimeout(() => resolveClosed(null), 3_000);
+  t.after(() => clearTimeout(timer));
+  const summary = await closed;
+  assert.ok(summary, "the idle tunnel must emit a close summary");
+  assert.equal(summary.reason, "tunnel_timeout");
+  assert.equal(summary.bytesFromClient, 0);
+  assert.equal(summary.bytesFromTarget, 0);
+  assert.ok(entries.some((entry) => entry.event === "tunnel_timeout"));
+});
+
 test("a malformed CONNECT request returns 400 without stopping the proxy", async (t) => {
   const origin = http.createServer((_request, response) => response.end("still-alive"));
   const originPort = await listen(origin);
