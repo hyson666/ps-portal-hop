@@ -517,3 +517,88 @@ test("chains CONNECT tunnels through an upstream proxy", async (t) => {
   );
   assert.match(response, /^HTTP\/1\.1 200 Connection Established/);
 });
+
+test("selective HTTP upstream routing bypasses unmatched hosts and fails closed for matched hosts", async (t) => {
+  let directRequests = 0;
+  let upstreamRequests = 0;
+  const origin = http.createServer((_request, response) => {
+    directRequests++;
+    response.end("direct-route");
+  });
+  const originPort = await listen(origin);
+  t.after(() => close(origin));
+  const upstream = http.createServer((_request, response) => {
+    upstreamRequests++;
+    response.end("upstream-route");
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => close(upstream));
+  const proxy = createProxyServer(localProxyConfig({
+    allowedHttpPorts: String(originPort), upstreamHost: "127.0.0.1", upstreamPort,
+    upstreamHosts: "localhost",
+  }));
+  const proxyPort = await listen(proxy);
+  t.after(() => close(proxy));
+  const selected = await requestThroughProxy(proxyPort, `http://localhost:${originPort}/selected`);
+  assert.equal(selected.body.toString(), "upstream-route");
+  const direct = await requestThroughProxy(proxyPort, `http://127.0.0.1:${originPort}/direct`);
+  assert.equal(direct.body.toString(), "direct-route");
+  assert.equal(upstreamRequests, 1);
+  assert.equal(directRequests, 1);
+  await close(upstream);
+  const unavailable = await requestThroughProxy(proxyPort, `http://localhost:${originPort}/no-fallback`);
+  assert.equal(unavailable.statusCode, 502);
+  assert.equal(directRequests, 1, "a matched host must not silently bypass a failed upstream");
+});
+
+test("selective CONNECT routing uses the upstream only for matched hosts", async (t) => {
+  let directConnections = 0;
+  let upstreamConnections = 0;
+  let proxy;
+  const upstreamSockets = new Set();
+  const origin = net.createServer((socket) => {
+    socket.on("error", () => {});
+    socket.once("data", () => {
+      directConnections++;
+      socket.write("direct-route");
+    });
+  });
+  const upstream = http.createServer();
+  upstream.on("connect", (_request, socket, head) => {
+    upstreamSockets.add(socket);
+    socket.on("close", () => upstreamSockets.delete(socket));
+    socket.on("error", () => {});
+    socket.on("end", () => socket.end());
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    let replied = false;
+    const reply = () => {
+      if (replied) return;
+      replied = true;
+      upstreamConnections++;
+      socket.write("upstream-route");
+    };
+    socket.on("data", reply);
+    if (head.length) reply();
+  });
+  t.after(async () => {
+    if (proxy) await close(proxy);
+    for (const socket of upstreamSockets) socket.destroy();
+    await close(upstream);
+    await close(origin);
+  });
+  const originPort = await listen(origin);
+  const upstreamPort = await listen(upstream);
+  proxy = createProxyServer(localProxyConfig({
+    allowedConnectPorts: String(originPort), upstreamHost: "127.0.0.1", upstreamPort,
+    upstreamHosts: "localhost",
+  }));
+  const proxyPort = await listen(proxy);
+  await connectAndCollect(proxyPort, [
+    `CONNECT localhost:${originPort} HTTP/1.1\r\nHost: localhost:${originPort}\r\n\r\nhello`,
+  ], "upstream-route");
+  await connectAndCollect(proxyPort, [
+    `CONNECT 127.0.0.1:${originPort} HTTP/1.1\r\nHost: 127.0.0.1:${originPort}\r\n\r\nhello`,
+  ], "direct-route");
+  assert.equal(upstreamConnections, 1);
+  assert.equal(directConnections, 1);
+});

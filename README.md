@@ -155,6 +155,7 @@ ALLOW_PUBLIC_PROXY=false
 | `TCP_KEEPALIVE_INITIAL_DELAY_MS` | `30000` | TCP 空闲后开始保活探测的延迟（毫秒），用于维持连接并发现失效对端 |
 | `UPSTREAM_HOST` | 空 | 可选上游 HTTP 代理地址 |
 | `UPSTREAM_PORT` | `8050` | 上游 HTTP 代理端口 |
+| `UPSTREAM_HOSTS` | `*` | 使用上游的目标域名，匹配规则同 `ALLOWED_HOSTS`；未命中的允许目标直接出站 |
 | `LOG_FORMAT` | `text` | `text`、`json` 或 `silent` |
 
 完整超时和限制配置参见 [.env.example](.env.example)。

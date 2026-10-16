@@ -4,13 +4,14 @@ const dns = require("node:dns").promises;
 const http = require("node:http");
 const net = require("node:net");
 
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 
 const DEFAULTS = Object.freeze({
   host: "127.0.0.1",
   port: 8050,
   upstreamHost: "",
   upstreamPort: 8050,
+  upstreamHosts: "*",
   allowedClients: "127.0.0.1,::1",
   allowedHosts: "*",
   allowedConnectPorts: "443",
@@ -169,9 +170,9 @@ function createClientMatcher(rules) {
   };
 }
 
-function createHostMatcher(rules) {
+function createHostMatcher(rules, optionName = "ALLOWED_HOSTS") {
   const entries = parseList(rules).map((entry) => entry.toLowerCase());
-  if (entries.length === 0) throw new Error("ALLOWED_HOSTS cannot be empty");
+  if (entries.length === 0) throw new Error(`${optionName} cannot be empty`);
   if (entries.includes("*")) {
     const matcher = () => true;
     matcher.allowsAll = true;
@@ -199,6 +200,7 @@ function buildConfig(overrides = {}) {
     port: parseInteger(raw.port, "PORT", DEFAULTS.port, 1, 65_535),
     upstreamHost: normalizeHostname(raw.upstreamHost),
     upstreamPort: parseInteger(raw.upstreamPort, "UPSTREAM_PORT", DEFAULTS.upstreamPort, 1, 65_535),
+    upstreamHosts: parseList(raw.upstreamHosts ?? DEFAULTS.upstreamHosts),
     allowedClients: parseList(raw.allowedClients ?? DEFAULTS.allowedClients),
     allowedHosts: parseList(raw.allowedHosts ?? DEFAULTS.allowedHosts),
     allowedConnectPorts: parsePortList(
@@ -320,6 +322,7 @@ function buildConfig(overrides = {}) {
 
   config.clientMatcher = createClientMatcher(config.allowedClients);
   config.hostMatcher = createHostMatcher(config.allowedHosts);
+  config.upstreamHostMatcher = createHostMatcher(config.upstreamHosts, "UPSTREAM_HOSTS");
 
   const wildcardListener = ["0.0.0.0", "::"].includes(config.host);
   const publicListener = wildcardListener && config.clientMatcher.allowsAll;
@@ -349,6 +352,7 @@ function loadConfig(env = process.env) {
     port: env.PORT,
     upstreamHost: env.UPSTREAM_HOST,
     upstreamPort: env.UPSTREAM_PORT,
+    upstreamHosts: env.UPSTREAM_HOSTS,
     allowedClients: env.ALLOWED_CLIENTS,
     allowedHosts: env.ALLOWED_HOSTS,
     allowedConnectPorts: env.ALLOWED_CONNECT_PORTS,
@@ -651,15 +655,16 @@ async function handleConnect(request, clientSocket, head, config, log, connectio
       throw Object.assign(new Error("CONNECT port is not allowed"), { statusCode: 403 });
     }
 
+    const viaUpstream = Boolean(config.upstreamHost && config.upstreamHostMatcher(target.hostname));
     const fields = {
       connectionId,
       client: normalizeAddress(clientSocket.remoteAddress),
       target: `${target.hostname}:${target.port}`,
-      mode: config.upstreamHost ? "upstream" : "direct",
+      mode: viaUpstream ? "upstream" : "direct",
     };
     log("connect", fields);
 
-    if (config.upstreamHost) {
+    if (viaUpstream) {
       await handleUpstreamConnect(request, clientSocket, head, target, config, log, fields);
     } else {
       await handleDirectConnect(request, clientSocket, head, target, config, log, fields);
@@ -711,18 +716,19 @@ async function handleHttpRequest(request, response, config, log, connectionId) {
     return;
   }
 
+  const viaUpstream = Boolean(config.upstreamHost && config.upstreamHostMatcher(hostname));
   const fields = {
     connectionId,
     client: normalizeAddress(request.socket.remoteAddress),
     method: request.method,
     target: `${hostname}:${port}`,
-    mode: config.upstreamHost ? "upstream" : "direct",
+    mode: viaUpstream ? "upstream" : "direct",
   };
   log("http_request", fields);
 
   const headers = filterHeaders(request.headers);
   headers.host = targetUrl.host;
-  const options = config.upstreamHost
+  const options = viaUpstream
     ? {
         host: config.upstreamHost,
         port: config.upstreamPort,
@@ -879,7 +885,9 @@ function startFromEnvironment() {
     log("server_listening", {
       version: VERSION,
       address: `${config.host}:${config.port}`,
-      mode: config.upstreamHost ? "upstream" : "direct",
+      mode: config.upstreamHost
+        ? (config.upstreamHostMatcher.allowsAll ? "upstream" : "selective-upstream")
+        : "direct",
       upstream: config.upstreamHost ? `${config.upstreamHost}:${config.upstreamPort}` : undefined,
       tunnelIdleTimeoutMs: config.tunnelIdleTimeoutMs,
       tcpKeepAliveInitialDelayMs: config.tcpKeepAliveInitialDelayMs,
